@@ -1,12 +1,15 @@
 import asyncio
 import json
 import logging
+import math  # Import math for isnan
 from datetime import datetime, timedelta
 
 import httpx
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.common.config import get_settings
 from backend.common.utils import calculate_true_price
@@ -24,6 +27,21 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(title="Market Data Aggregator Service")
 
+# Define allowed origins for CORS
+allowed_origins = [
+    "http://localhost:3000",  # Allow local development frontend
+    "https://app.yourdomain.com"  # Production frontend URL
+]
+
+# Add CORS middleware with restricted origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 # Initialize database
 init_db()
 
@@ -39,27 +57,33 @@ async def startup_event():
 async def aggregate_market_data():
     """
     Aggregate market data from the database and calculate true prices.
-    Run periodically.
+    Run periodically using a single DB session per cycle.
     """
     while True:
+        db: Session = next(get_db())
         try:
-            # Get DB session
-            db: Session = next(get_db())
-            try:
-                # Get all market IDs from the database
-                markets = db.query(Market).all()
+            # Get all market IDs from the database
+            markets = db.query(Market).all()
+            if not markets:
+                logger.warning("No markets found in DB for aggregation.")
+            else:
+                logger.info(f"Aggregating data for {len(markets)} markets...")
+                tasks = [process_market(market.id, db) for market in markets]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Error processing market {markets[i].id} during aggregation: {result}")
 
-                for market in markets:
-                    market_id = market.id
-                    await process_market(market_id, db)
-            finally:
-                db.close() # Close session after processing all markets
-
-            # Wait for the next aggregation interval
-            await asyncio.sleep(settings.aggregation_interval)
+        except SQLAlchemyError as e:
+            logger.error(f"Database error fetching markets for aggregation: {e}")
+            # No rollback needed for read
         except Exception as e:
-            logger.error(f"Error in market data aggregation: {e}")
-            await asyncio.sleep(5)  # Wait 5 seconds on error
+            logger.error(f"Error in market data aggregation cycle: {e}", exc_info=True)
+        finally:
+            db.close()  # Close session after processing all markets
+
+        # Wait for the next aggregation interval
+        await asyncio.sleep(settings.aggregation_interval)
 
 async def process_market(market_id: str, db: Session):
     """Process a single market's data and calculate the true price using the provided DB session."""
@@ -71,18 +95,31 @@ async def process_market(market_id: str, db: Session):
             .first()
 
         if not latest_snapshot:
-            logger.warning(f"No snapshot data found for market {market_id} in DB")
             return
 
         # Deserialize bids and asks from raw_data
-        snapshot_data = json.loads(latest_snapshot.raw_data)
-        bids = snapshot_data.get("bids", [])
-        asks = snapshot_data.get("asks", [])
+        try:
+            snapshot_data = json.loads(latest_snapshot.raw_data)
+            bids = snapshot_data.get("bids", [])
+            asks = snapshot_data.get("asks", [])
+        except json.JSONDecodeError as json_err:
+            logger.error(f"Failed to decode snapshot raw_data for market {market_id}, snapshot ID {latest_snapshot.id}: {json_err}")
+            return
+
         # Use mid_price stored in the snapshot
         mid_price = latest_snapshot.mid_price
 
         # Calculate true price
         true_price_value = calculate_true_price(bids, asks)
+
+        # Check if calculation resulted in NaN (e.g., due to invalid inputs)
+        if math.isnan(true_price_value):
+            logger.warning(f"True price calculation resulted in NaN for market {market_id}. Skipping storage.")
+            return
+        # Also check mid_price if it's used and could be NaN
+        if mid_price is None or math.isnan(mid_price):
+            logger.warning(f"Mid price is invalid (None or NaN) for market {market_id}. Skipping storage.")
+            return
 
         # Create true price model
         true_price = TruePriceModel(
@@ -95,50 +132,90 @@ async def process_market(market_id: str, db: Session):
         # Store true price in database
         await store_true_price_in_db(true_price, db)
 
-        logger.info(f"Calculated true price {true_price_value} for market {market_id} (mid price: {mid_price})")
+        logger.info(f"Calculated true price {true_price_value:.4f} for market {market_id} (mid price: {mid_price:.4f})")
+
+    except SQLAlchemyError as e:
+        # Log DB errors during snapshot retrieval
+        logger.error(f"Database error retrieving snapshot for market {market_id}: {e}")
+        # Don't rollback here as it's likely a read error
+        raise  # Re-raise to be caught by gather
     except Exception as e:
-        logger.error(f"Error processing market {market_id}: {e}")
+        logger.error(f"Unexpected error processing market {market_id}: {e}", exc_info=True)
+        raise  # Re-raise to be caught by gather
 
 async def store_true_price_in_db(true_price: TruePriceModel, db: Session):
     """Store true price in the database using the provided session."""
-    db_true_price = TruePrice(
-        market_id=true_price.market_id,
-        timestamp=true_price.timestamp,
-        value=true_price.value,
-        mid_price=true_price.mid_price
-    )
+    try:
+        db_true_price = TruePrice(
+            market_id=true_price.market_id,
+            timestamp=true_price.timestamp,
+            value=true_price.value,
+            mid_price=true_price.mid_price
+        )
 
-    db.add(db_true_price)
-    db.commit()
+        db.add(db_true_price)
+        db.commit()
 
-    # Optional: Supabase Realtime
-    # To trigger realtime updates on the frontend for new true_prices:
-    # 1. Ensure the `true_prices` table has Row Level Security (RLS) enabled in Supabase.
-    # 2. Define a publication in Supabase for the `true_prices` table (e.g., `supabase_realtime`).
-    #    ```sql
-    #    CREATE PUBLICATION supabase_realtime FOR TABLE true_prices;
-    #    ```
-    # 3. The frontend `supabase-js` client can then subscribe to inserts on this table.
+        # Supabase Realtime Integration Comment:
+        # -------------------------------------
+        # The insert into the 'true_prices' table above will trigger a
+        # notification via Supabase Realtime if:
+        # 1. RLS is enabled for 'true_prices'.
+        # 2. A suitable RLS policy allows reads (e.g., public read).
+        # 3. A Supabase publication includes 'true_prices' (e.g., 'supabase_realtime').
+        #
+        # Frontend clients using supabase-js can subscribe to these changes like so:
+        #
+        # const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        #
+        # const channel = supabase.channel('schema-db-changes');
+        # channel.on(
+        #   'postgres_changes',
+        #   { event: 'INSERT', schema: 'public', table: 'true_prices' },
+        #   (payload) => {
+        #     console.log('New true price received:', payload.new);
+        #     // Update your frontend state/UI here
+        #   }
+        # ).subscribe();
+        #
+        # See Supabase Realtime documentation for more details.
+        # -------------------------------------
 
-    logger.info(f"Stored true price {true_price.value} for market {true_price.market_id}")
+        logger.info(f"Stored true price {true_price.value:.4f} for market {true_price.market_id}")
 
-@app.get("/api/true-price/{market_id}")
+    except SQLAlchemyError as e:
+        logger.error(f"Database error storing true price for market {true_price.market_id}: {e}")
+        db.rollback()  # Rollback failed commit
+        raise  # Re-raise to be caught by caller
+    except Exception as e:
+        logger.error(f"Unexpected error storing true price for market {true_price.market_id}: {e}", exc_info=True)
+        db.rollback()
+        raise  # Re-raise
+
+@app.get("/api/true-price/{market_id}", response_model=TruePriceModel)
 async def get_true_price(market_id: str, db: Session = Depends(get_db)):
     """Get the latest true price for a specific market from the database."""
-    latest_true_price = db.query(TruePrice)\
-        .filter(TruePrice.market_id == market_id)\
-        .order_by(desc(TruePrice.timestamp))\
-        .first()
+    try:
+        latest_true_price = db.query(TruePrice)\
+            .filter(TruePrice.market_id == market_id)\
+            .order_by(desc(TruePrice.timestamp))\
+            .first()
 
-    if not latest_true_price:
-        raise HTTPException(status_code=404, detail="No true price data found for this market")
+        if not latest_true_price:
+            raise HTTPException(status_code=404, detail="No true price data found for this market")
 
-    return TruePriceModel(
-        market_id=latest_true_price.market_id,
-        timestamp=latest_true_price.timestamp,
-        value=latest_true_price.value,
-        mid_price=latest_true_price.mid_price
-    )
+        # Convert ORM object to Pydantic model before returning
+        return TruePriceModel.from_orm(latest_true_price)
+
+    except SQLAlchemyError as e:
+        logger.error(f"Database error retrieving true price for market {market_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve true price data")
+    except Exception as e:
+        logger.error(f"Unexpected error retrieving true price for market {market_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
+    finally:
+        # Assuming get_db uses yield
+        pass
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Leaderboard as LeaderboardType, LeaderboardEntry } from '../types';
+import { Leaderboard as LeaderboardType } from '../types';
 
 interface LeaderboardProps {
   marketId: string;
@@ -102,4 +102,4 @@ export default function Leaderboard({ marketId }: LeaderboardProps) {
       </div>
     </div>
   );
-} 
+}

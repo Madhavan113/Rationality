@@ -5,10 +5,13 @@ import smtplib
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from typing import List
 
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.common.config import get_settings
 from backend.common.db import AlertRule, AlertNotification, Market, TruePrice, init_db, get_db
@@ -25,6 +28,24 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(title="Market Alerts Service")
 
+# Define allowed origins for CORS
+allowed_origins = [
+    "http://localhost:3000",  # Allow local development frontend
+    "https://app.yourdomain.com"  # Production frontend URL
+]
+
+# Add CORS middleware with restricted origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# Initialize database
+init_db()
+
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "service": settings.service_name}
@@ -37,31 +58,36 @@ async def startup_event():
 async def check_alerts():
     """
     Background task to check for alert conditions and send notifications.
-    Fetches data from the database.
+    Fetches data from the database using a single session per cycle.
     """
     while True:
+        db: Session = next(get_db())
         try:
-            # Get DB session
-            db: Session = next(get_db())
-            try:
-                # Get all active alert rules from the database
-                alert_rules = db.query(AlertRule).filter(AlertRule.is_active == True).all()
+            # Get all active alert rules from the database
+            alert_rules = db.query(AlertRule).filter(AlertRule.is_active == True).all()
+            if not alert_rules:
+                pass # No rules to check
+            else:
+                logger.info(f"Checking {len(alert_rules)} active alert rules...")
+                tasks = [check_alert_rule(AlertRuleModel.from_orm(rule_orm), db) for rule_orm in alert_rules]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Error checking alert rule ID {alert_rules[i].id}: {result}")
 
-                for rule_orm in alert_rules:
-                    rule_model = AlertRuleModel.from_orm(rule_orm)
-                    await check_alert_rule(rule_model, db)
-            finally:
-                db.close()
-
-            # Wait before the next check
-            await asyncio.sleep(5)
+        except SQLAlchemyError as e:
+            logger.error(f"Database error fetching alert rules: {e}")
         except Exception as e:
-            logger.error(f"Error checking alerts: {e}")
-            await asyncio.sleep(10)
+            logger.error(f"Error during alert checking cycle: {e}", exc_info=True)
+        finally:
+            db.close()
+
+        await asyncio.sleep(5)
 
 async def check_alert_rule(rule: AlertRuleModel, db: Session):
     """
     Check if an alert rule's conditions are met using data from the DB session.
+    Handles potential errors during the check.
     """
     try:
         # Get the latest true price from the database
@@ -71,15 +97,14 @@ async def check_alert_rule(rule: AlertRuleModel, db: Session):
             .first()
 
         if not latest_true_price:
-            logger.warning(f"No true price data found for market {rule.market_id} in DB")
             return
 
         # Extract values
         true_price = latest_true_price.value
         mid_price = latest_true_price.mid_price
 
-        # Calculate difference as a percentage
-        if mid_price == 0:
+        # Avoid division by zero or invalid calculations
+        if mid_price is None or mid_price == 0 or true_price is None:
             return
 
         difference = abs(true_price - mid_price) / mid_price
@@ -102,8 +127,8 @@ async def check_alert_rule(rule: AlertRuleModel, db: Session):
                 timestamp=datetime.utcnow()
             )
 
-            # Send email notification
-            await send_alert_email(rule, notification_model)
+            # Send email notification (non-blocking)
+            asyncio.create_task(send_alert_email(rule, notification_model))
 
             # Store notification in database
             db_notification = AlertNotification(
@@ -117,109 +142,189 @@ async def check_alert_rule(rule: AlertRuleModel, db: Session):
             db.add(db_notification)
             db.commit()
 
-            logger.info(f"Alert triggered and stored: {rule.name} - Difference: {difference:.4f}")
-    except Exception as e:
-        logger.error(f"Error checking alert rule {rule.id}: {e}")
+            logger.info(f"Alert triggered and stored: {rule.name} (Rule ID: {rule.id}) - Difference: {difference:.4f}")
+
+    except SQLAlchemyError as e:
+        logger.error(f"Database error checking/storing notification for alert rule {rule.id}: {e}")
         db.rollback()
-
-async def send_alert_email(rule: AlertRuleModel, notification: AlertNotificationModel):
-    """
-    Send an email notification for an alert.
-    """
-    try:
-        # Create message
-        msg = MIMEMultipart()
-        msg['From'] = settings.email_from
-        msg['To'] = rule.email
-        msg['Subject'] = f"Market Alert: {rule.name}"
-
-        # Create message body
-        body = f"""
-        <html>
-        <body>
-            <h2>Market Alert Notification</h2>
-            <p>Your alert rule "{rule.name}" has been triggered.</p>
-            <p>Details:</p>
-            <ul>
-                <li>Market ID: {notification.market_id}</li>
-                <li>True Price: {notification.true_price:.4f}</li>
-                <li>Mid Price: {notification.mid_price:.4f}</li>
-                <li>Difference: {notification.difference:.4f} ({notification.difference * 100:.2f}%)</li>
-                <li>Timestamp: {notification.timestamp}</li>
-            </ul>
-        </body>
-        </html>
-        """
-
-        msg.attach(MIMEText(body, 'html'))
-
-        # Send email
-        logger.info(f"Email notification sent to {rule.email} for alert {rule.name}")
+        raise
     except Exception as e:
-        logger.error(f"Error sending email notification: {e}")
+        logger.error(f"Unexpected error checking alert rule {rule.id}: {e}", exc_info=True)
+        db.rollback()
+        raise
 
-@app.post("/api/alerts")
+async def send_alert_email(rule: AlertRuleModel, notification: AlertNotificationModel, max_retries=3, initial_delay=1):
+    """
+    Send an email notification for an alert with retry logic.
+    
+    Args:
+        rule: The alert rule that was triggered
+        notification: The notification details
+        max_retries: Maximum number of retry attempts (default: 3)
+        initial_delay: Initial delay in seconds between retries, doubles on each retry (default: 1)
+    """
+    retries = 0
+    delay = initial_delay
+    
+    while retries <= max_retries:
+        try:
+            # Create message
+            msg = MIMEMultipart()
+            msg['From'] = settings.email_from
+            msg['To'] = rule.email
+            msg['Subject'] = f"Market Alert: {rule.name}"
+
+            # Create message body
+            body = f"""
+            <html>
+            <body>
+                <h2>Market Alert Notification</h2>
+                <p>Your alert rule "{rule.name}" (ID: {rule.id}) has been triggered.</p>
+                <p>Details:</p>
+                <ul>
+                    <li>Market ID: {notification.market_id}</li>
+                    <li>True Price: {notification.true_price:.4f}</li>
+                    <li>Mid Price: {notification.mid_price:.4f}</li>
+                    <li>Difference: {notification.difference:.4f} ({notification.difference * 100:.2f}%)</li>
+                    <li>Threshold: {rule.threshold} ({rule.condition})</li>
+                    <li>Timestamp: {notification.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}</li>
+                </ul>
+            </body>
+            </html>
+            """
+            msg.attach(MIMEText(body, 'html'))
+
+            # Send email using configured SMTP settings
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as server:
+                if settings.smtp_user and settings.smtp_password:
+                    server.starttls()
+                    server.login(settings.smtp_user, settings.smtp_password)
+                server.sendmail(settings.email_from, rule.email, msg.as_string())
+                logger.info(f"Email notification sent to {rule.email} for alert {rule.name} (Rule ID: {rule.id})")
+                
+                # Success, so exit the retry loop
+                return True
+
+        except smtplib.SMTPServerDisconnected as e:
+            retries += 1
+            if retries > max_retries:
+                logger.error(f"Failed to connect to SMTP server after {max_retries} attempts for alert {rule.id}: {e}")
+                return False
+                
+            logger.warning(f"SMTP server disconnected, retrying ({retries}/{max_retries}) in {delay}s: {e}")
+            await asyncio.sleep(delay)
+            delay *= 2  # Exponential backoff
+            
+        except smtplib.SMTPException as e:
+            retries += 1
+            if retries > max_retries:
+                logger.error(f"SMTP error sending email for alert {rule.id} after {max_retries} attempts: {e}")
+                return False
+                
+            logger.warning(f"SMTP error, retrying ({retries}/{max_retries}) in {delay}s: {e}")
+            await asyncio.sleep(delay)
+            delay *= 2  # Exponential backoff
+            
+        except Exception as e:
+            logger.error(f"Unexpected error sending email for alert {rule.id}: {e}", exc_info=True)
+            # For unexpected errors, don't retry as they're likely to fail again
+            return False
+            
+    return False  # If we get here, all retries failed
+
+@app.post("/api/alerts", response_model=AlertRuleModel)
 async def create_alert(
     alert: AlertRuleModel,
     db: Session = Depends(get_db)
 ):
     """Create a new alert rule."""
-    # Check if market exists
-    market = db.query(Market).filter(Market.id == alert.market_id).first()
-    if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+    try:
+        # Check if market exists
+        market = db.query(Market).filter(Market.id == alert.market_id).first()
+        if not market:
+            raise HTTPException(status_code=404, detail=f"Market with ID '{alert.market_id}' not found")
 
-    # Generate ID if not provided
-    if not alert.id:
-        alert.id = str(uuid.uuid4())
+        # Generate ID if not provided
+        if not alert.id:
+            alert.id = str(uuid.uuid4())
 
-    # Store in database
-    db_alert = AlertRule(
-        id=alert.id,
-        name=alert.name,
-        market_id=alert.market_id,
-        email=alert.email,
-        threshold=alert.threshold,
-        condition=alert.condition
-    )
+        # Validate condition
+        if alert.condition not in ["above", "below"]:
+            raise HTTPException(status_code=400, detail="Condition must be 'above' or 'below'")
 
-    db.add(db_alert)
-    db.commit()
+        # Validate threshold
+        if not (0 < alert.threshold < 1):
+             raise HTTPException(status_code=400, detail="Threshold must be between 0 and 1 (exclusive)")
 
-    return {
-        "id": alert.id,
-        "message": "Alert rule created successfully"
-    }
+        # Store in database
+        db_alert = AlertRule(
+            id=alert.id,
+            name=alert.name,
+            market_id=alert.market_id,
+            email=alert.email,
+            threshold=alert.threshold,
+            condition=alert.condition,
+            is_active=True,
+            created_at=datetime.utcnow()
+        )
 
-@app.get("/api/alerts")
+        db.add(db_alert)
+        db.commit()
+        db.refresh(db_alert)
+        logger.info(f"Created alert rule {db_alert.id}: {db_alert.name}")
+        return AlertRuleModel.from_orm(db_alert)
+
+    except SQLAlchemyError as e:
+        logger.error(f"Database error creating alert rule: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to create alert rule in database")
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Unexpected error creating alert rule: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
+    finally:
+        pass
+
+@app.get("/api/alerts", response_model=List[AlertRuleModel])
 async def get_alerts(db: Session = Depends(get_db)):
     """Get all alert rules."""
-    alerts = db.query(AlertRule).all()
-    return [
-        {
-            "id": alert.id,
-            "name": alert.name,
-            "market_id": alert.market_id,
-            "email": alert.email,
-            "threshold": alert.threshold,
-            "condition": alert.condition,
-            "is_active": alert.is_active,
-            "created_at": alert.created_at
-        }
-        for alert in alerts
-    ]
+    try:
+        alerts_orm = db.query(AlertRule).all()
+        return [AlertRuleModel.from_orm(alert) for alert in alerts_orm]
+    except SQLAlchemyError as e:
+        logger.error(f"Database error retrieving alert rules: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve alert rules")
+    except Exception as e:
+        logger.error(f"Unexpected error retrieving alert rules: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
+    finally:
+        pass
 
-@app.delete("/api/alerts/{alert_id}")
+@app.delete("/api/alerts/{alert_id}", status_code=204)
 async def delete_alert(alert_id: str, db: Session = Depends(get_db)):
     """Delete an alert rule."""
-    alert = db.query(AlertRule).filter(AlertRule.id == alert_id).first()
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert rule not found")
+    try:
+        alert = db.query(AlertRule).filter(AlertRule.id == alert_id).first()
+        if not alert:
+            raise HTTPException(status_code=404, detail="Alert rule not found")
 
-    db.delete(alert)
-    db.commit()
+        db.delete(alert)
+        db.commit()
+        logger.info(f"Deleted alert rule {alert_id}")
+        return
 
-    return {"message": "Alert rule deleted successfully"}
+    except SQLAlchemyError as e:
+        logger.error(f"Database error deleting alert rule {alert_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete alert rule")
+    except Exception as e:
+        logger.error(f"Unexpected error deleting alert rule {alert_id}: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
+    finally:
+        pass
 
 if __name__ == "__main__":
     import uvicorn
