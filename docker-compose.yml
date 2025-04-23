@@ -1,0 +1,124 @@
+services:
+  # Frontend service
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - ingestion
+      - aggregator
+      - leaderboard
+      - alerts
+      - rationality
+    environment:
+      - NODE_ENV=development
+
+  # Backend services
+  ingestion:
+    build:
+      context: ./backend
+      dockerfile: ingestion/Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+
+  aggregator:
+    build:
+      context: ./backend
+      dockerfile: aggregator/Dockerfile
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+
+  leaderboard:
+    build:
+      context: ./backend
+      dockerfile: leaderboard/Dockerfile
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+
+  alerts:
+    build:
+      context: ./backend
+      dockerfile: alerts/Dockerfile
+    ports:
+      - "8004:8004"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+      - SMTP_HOST=mailhog
+      - SMTP_PORT=1025
+
+  rationality:
+    build:
+      context: ./backend
+      dockerfile: rationality/Dockerfile
+    ports:
+      - "8005:8005"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+
+  # Database services
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: timescale/timescaledb:latest-pg14
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=market_data
+
+  # Mail service for testing
+  mailhog:
+    image: mailhog/mailhog
+    ports:
+      - "1025:1025" # SMTP port
+      - "8025:8025" # Web UI
+
+volumes:
+  redis_data:
+  postgres_data:
