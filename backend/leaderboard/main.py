@@ -2,14 +2,14 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 import uuid
+import random
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import func, desc
 from sqlalchemy.orm import Session
 
 from backend.common.config import get_settings
-from backend.common.utils import get_db, calculate_brier_score
-from backend.common.db import Market, Trader, TraderScore, init_db
+from backend.common.db import Market, Trader, TraderScore, init_db, get_db
 from backend.common.models import LeaderboardEntry, Leaderboard
 
 # Initialize settings and logging
@@ -37,34 +37,29 @@ async def startup_event():
 
 async def update_trader_scores():
     """
-    Background task to update trader scores.
-    In a real implementation, this would analyze trader predictions and calculate Brier scores.
+    Background task to update trader scores based on market outcomes.
+    Fetches data and stores scores in the database.
     """
     while True:
         try:
-            # In a real implementation, this would:
-            # 1. Get recent market data
-            # 2. Get trader predictions
-            # 3. Calculate Brier scores
-            # 4. Update trader scores in the database
-            
-            # For demo purposes, we'll just add some random scores
-            await generate_mock_trader_scores()
-            
+            # Get DB session
+            db: Session = next(get_db())
+            try:
+                # For demo purposes, we'll generate mock scores and store them.
+                await generate_and_store_mock_trader_scores(db)
+            finally:
+                db.close()  # Close session after update cycle
+
             # Wait before the next update
             await asyncio.sleep(60)  # Update every minute
         except Exception as e:
             logger.error(f"Error updating trader scores: {e}")
             await asyncio.sleep(30)  # Wait 30 seconds on error
 
-async def generate_mock_trader_scores():
-    """Generate mock trader scores for demonstration purposes."""
-    # This is just a placeholder. In a real implementation, scores would be
-    # calculated based on actual trader predictions and market outcomes.
-    import random
-    
-    # Mock traders
-    mock_traders = [
+async def generate_and_store_mock_trader_scores(db: Session):
+    """Generate mock trader scores and store them in the database."""
+    # Ensure mock traders exist
+    mock_trader_data = [
         {"id": "trader1", "name": "Alice"},
         {"id": "trader2", "name": "Bob"},
         {"id": "trader3", "name": "Charlie"},
@@ -73,21 +68,45 @@ async def generate_mock_trader_scores():
         {"id": "trader6", "name": "Fiona"},
         {"id": "trader7", "name": "George"}
     ]
-    
-    # Mock markets
-    mock_markets = ["1", "2"]
-    
+    for t_data in mock_trader_data:
+        trader = db.query(Trader).filter(Trader.id == t_data["id"]).first()
+        if not trader:
+            trader = Trader(id=t_data["id"], name=t_data["name"])
+            db.add(trader)
+    db.commit()  # Commit traders if any were added
+
+    # Mock markets (fetch from DB)
+    markets = db.query(Market).all()
+    if not markets:
+        logger.warning("No markets found in DB to generate scores for.")
+        return
+
     # Generate scores
-    for market_id in mock_markets:
-        for trader in mock_traders:
-            # Generate a random score between 0 and 1 (lower is better for Brier score)
+    for market in markets:
+        for t_data in mock_trader_data:
+            # Generate a random score (lower is better for Brier score)
             score = random.random()
-            
-            # Log the score
-            logger.info(f"Generated score {score} for trader {trader['name']} in market {market_id}")
-            
-            # In a real implementation, this would be stored in the database
-            # For now, we just log it
+
+            # Create or update score
+            existing_score = db.query(TraderScore)\
+                .filter(TraderScore.trader_id == t_data["id"], TraderScore.market_id == market.id)\
+                .first()
+
+            if existing_score:
+                existing_score.score = score  # Update existing score
+                existing_score.timestamp = datetime.utcnow()
+            else:
+                new_score = TraderScore(
+                    trader_id=t_data["id"],
+                    market_id=market.id,
+                    score=score,
+                    timestamp=datetime.utcnow()
+                )
+                db.add(new_score)
+
+            logger.info(f"Generated/Updated score {score} for trader {t_data['name']} in market {market.id}")
+
+    db.commit()  # Commit all score updates
 
 @app.get("/api/markets")
 async def get_markets(db: Session = Depends(get_db)):
@@ -102,55 +121,47 @@ async def get_markets(db: Session = Depends(get_db)):
         for market in markets
     ]
 
-@app.get("/api/leaderboard/{market_id}")
+@app.get("/api/leaderboard/{market_id}", response_model=Leaderboard)
 async def get_leaderboard(market_id: str, db: Session = Depends(get_db)):
     """
-    Get the leaderboard for a specific market.
-    Returns the top 5 traders by score.
+    Get the leaderboard for a specific market from the database.
+    Returns the top traders based on the latest scores.
     """
-    # In a real implementation, this would query the database for the latest scores
-    # For demo purposes, we'll generate random scores
-    import random
-    
-    # Mock traders
-    mock_traders = [
-        {"id": "trader1", "name": "Alice"},
-        {"id": "trader2", "name": "Bob"},
-        {"id": "trader3", "name": "Charlie"},
-        {"id": "trader4", "name": "Diana"},
-        {"id": "trader5", "name": "Evan"},
-        {"id": "trader6", "name": "Fiona"},
-        {"id": "trader7", "name": "George"}
-    ]
-    
-    # Generate entries
+    # Check if market exists
+    market = db.query(Market).filter(Market.id == market_id).first()
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+
+    # Query for the latest score for each trader in the specified market
+    top_scores = db.query(TraderScore, Trader.name)\
+        .join(Trader, TraderScore.trader_id == Trader.id)\
+        .filter(TraderScore.market_id == market_id)\
+        .order_by(TraderScore.score.asc())\
+        .limit(10)\
+        .all()
+
+    if not top_scores:
+        # Return empty leaderboard if no scores found
+        return Leaderboard(market_id=market_id, timestamp=datetime.utcnow(), entries=[])
+
+    # Format entries
     entries = []
-    for i, trader in enumerate(mock_traders[:5]):  # Top 5 traders
-        # Generate a random score between 0 and 1 (lower is better for Brier score)
-        score = random.random() * 0.5  # Make scores better (lower) for top traders
-        
+    for i, (score_entry, trader_name) in enumerate(top_scores):
         entry = LeaderboardEntry(
-            trader_id=trader["id"],
-            trader_name=trader["name"],
-            market_id=market_id,
-            score=score,
-            position=i+1
+            trader_id=score_entry.trader_id,
+            trader_name=trader_name,
+            market_id=score_entry.market_id,
+            score=score_entry.score,
+            position=i + 1
         )
         entries.append(entry)
-    
-    # Sort by score (lower is better)
-    entries.sort(key=lambda x: x.score)
-    
-    # Update positions
-    for i, entry in enumerate(entries):
-        entry.position = i + 1
-    
+
     leaderboard = Leaderboard(
         market_id=market_id,
         timestamp=datetime.utcnow(),
         entries=entries
     )
-    
+
     return leaderboard
 
 @app.post("/api/traders")
@@ -161,10 +172,10 @@ async def create_trader(name: str, db: Session = Depends(get_db)):
         id=trader_id,
         name=name
     )
-    
+
     db.add(trader)
     db.commit()
-    
+
     return {"id": trader_id, "name": name}
 
 if __name__ == "__main__":
@@ -174,4 +185,4 @@ if __name__ == "__main__":
         host=settings.service_host,
         port=settings.service_port,
         reload=True
-    ) 
+    )

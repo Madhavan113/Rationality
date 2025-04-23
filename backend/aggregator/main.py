@@ -1,15 +1,16 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
-from fastapi import FastAPI, BackgroundTasks, Depends
+from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import select, desc
 
 from backend.common.config import get_settings
-from backend.common.utils import get_db, get_from_redis, store_in_redis, calculate_true_price
-from backend.common.db import Market, TruePrice, init_db
+from backend.common.utils import calculate_true_price
+from backend.common.db import Market, TruePrice, MarketSnapshot, init_db, get_db
 from backend.common.models import TruePrice as TruePriceModel
 
 # Initialize settings and logging
@@ -37,45 +38,52 @@ async def startup_event():
 
 async def aggregate_market_data():
     """
-    Aggregate market data from Redis and calculate true prices.
-    Run every second to provide real-time data.
+    Aggregate market data from the database and calculate true prices.
+    Run periodically.
     """
     while True:
         try:
-            # Get all market IDs
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"http://ingestion:8001/api/markets")
-                markets = response.json()
+            # Get DB session
+            db: Session = next(get_db())
+            try:
+                # Get all market IDs from the database
+                markets = db.query(Market).all()
 
-            for market in markets:
-                market_id = market["id"]
-                await process_market(market_id)
-            
+                for market in markets:
+                    market_id = market.id
+                    await process_market(market_id, db)
+            finally:
+                db.close() # Close session after processing all markets
+
             # Wait for the next aggregation interval
             await asyncio.sleep(settings.aggregation_interval)
         except Exception as e:
             logger.error(f"Error in market data aggregation: {e}")
             await asyncio.sleep(5)  # Wait 5 seconds on error
 
-async def process_market(market_id: str):
-    """Process a single market's data and calculate the true price."""
+async def process_market(market_id: str, db: Session):
+    """Process a single market's data and calculate the true price using the provided DB session."""
     try:
-        # Get the latest snapshot from Redis
-        redis_key = f"market:{market_id}:snapshot"
-        snapshot_data = get_from_redis(redis_key)
-        
-        if not snapshot_data:
-            logger.warning(f"No snapshot data found for market {market_id}")
+        # Get the latest snapshot from the database
+        latest_snapshot = db.query(MarketSnapshot)\
+            .filter(MarketSnapshot.market_id == market_id)\
+            .order_by(desc(MarketSnapshot.timestamp))\
+            .first()
+
+        if not latest_snapshot:
+            logger.warning(f"No snapshot data found for market {market_id} in DB")
             return
-        
-        # Extract bids and asks
+
+        # Deserialize bids and asks from raw_data
+        snapshot_data = json.loads(latest_snapshot.raw_data)
         bids = snapshot_data.get("bids", [])
         asks = snapshot_data.get("asks", [])
-        mid_price = snapshot_data.get("mid_price", 0.0)
-        
+        # Use mid_price stored in the snapshot
+        mid_price = latest_snapshot.mid_price
+
         # Calculate true price
         true_price_value = calculate_true_price(bids, asks)
-        
+
         # Create true price model
         true_price = TruePriceModel(
             market_id=market_id,
@@ -83,61 +91,54 @@ async def process_market(market_id: str):
             value=true_price_value,
             mid_price=mid_price
         )
-        
-        # Store in Redis
-        redis_key_true_price = f"market:{market_id}:true_price"
-        store_in_redis(redis_key_true_price, true_price.dict(), expiry=3600)
-        
-        # Store in database
-        await store_true_price_in_db(true_price)
-        
+
+        # Store true price in database
+        await store_true_price_in_db(true_price, db)
+
         logger.info(f"Calculated true price {true_price_value} for market {market_id} (mid price: {mid_price})")
     except Exception as e:
         logger.error(f"Error processing market {market_id}: {e}")
 
-async def store_true_price_in_db(true_price: TruePriceModel):
-    """Store true price in the database."""
+async def store_true_price_in_db(true_price: TruePriceModel, db: Session):
+    """Store true price in the database using the provided session."""
     db_true_price = TruePrice(
         market_id=true_price.market_id,
         timestamp=true_price.timestamp,
         value=true_price.value,
         mid_price=true_price.mid_price
     )
-    
-    # TODO: Implement actual database storage
+
+    db.add(db_true_price)
+    db.commit()
+
+    # Optional: Supabase Realtime
+    # To trigger realtime updates on the frontend for new true_prices:
+    # 1. Ensure the `true_prices` table has Row Level Security (RLS) enabled in Supabase.
+    # 2. Define a publication in Supabase for the `true_prices` table (e.g., `supabase_realtime`).
+    #    ```sql
+    #    CREATE PUBLICATION supabase_realtime FOR TABLE true_prices;
+    #    ```
+    # 3. The frontend `supabase-js` client can then subscribe to inserts on this table.
+
     logger.info(f"Stored true price {true_price.value} for market {true_price.market_id}")
 
 @app.get("/api/true-price/{market_id}")
-async def get_true_price(market_id: str):
-    """Get the latest true price for a specific market."""
-    redis_key = f"market:{market_id}:true_price"
-    true_price_data = get_from_redis(redis_key)
-    
-    if not true_price_data:
-        return {"error": "No true price data found for this market"}
-    
-    return true_price_data
+async def get_true_price(market_id: str, db: Session = Depends(get_db)):
+    """Get the latest true price for a specific market from the database."""
+    latest_true_price = db.query(TruePrice)\
+        .filter(TruePrice.market_id == market_id)\
+        .order_by(desc(TruePrice.timestamp))\
+        .first()
 
-@app.websocket("/ws/true-price/{market_id}")
-async def websocket_true_price(websocket, market_id: str):
-    """WebSocket endpoint to stream true price updates."""
-    await websocket.accept()
-    
-    try:
-        while True:
-            # Get the latest true price from Redis
-            redis_key = f"market:{market_id}:true_price"
-            true_price_data = get_from_redis(redis_key)
-            
-            if true_price_data:
-                await websocket.send_json(true_price_data)
-            
-            # Wait before sending the next update
-            await asyncio.sleep(1)
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-    finally:
-        await websocket.close()
+    if not latest_true_price:
+        raise HTTPException(status_code=404, detail="No true price data found for this market")
+
+    return TruePriceModel(
+        market_id=latest_true_price.market_id,
+        timestamp=latest_true_price.timestamp,
+        value=latest_true_price.value,
+        mid_price=latest_true_price.mid_price
+    )
 
 if __name__ == "__main__":
     import uvicorn
@@ -146,4 +147,4 @@ if __name__ == "__main__":
         host=settings.service_host,
         port=settings.service_port,
         reload=True
-    ) 
+    )

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "nixpacksConfig": {
+      "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    }
+    // Note: For a monorepo with multiple services, you might need
+    // to specify the root directory for each service in Railway's UI
+    // or use multiple railway.json files / more complex Nixpacks config.
+    // This config assumes Railway builds from the root and the start command
+    // is run relative to the specific service directory (e.g., backend/aggregator).
+    // You will likely need to adjust the start command or Dockerfile CMD
+    // depending on how Railway handles the monorepo structure.
+    // Example CMD in Dockerfile: CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    // Then the railway.json startCommand might not be needed if using Dockerfiles.
+  },
+  "deploy": {
+    "numReplicas": 1,
+    "sleepApplication": false,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}

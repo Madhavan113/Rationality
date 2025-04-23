@@ -1,10 +1,14 @@
 import os
 from pydantic import BaseSettings
+from dotenv import load_dotenv
+
+load_dotenv() # Load environment variables from .env file
 
 class Settings(BaseSettings):
-    # Database settings
-    database_url: str = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/market_data")
-    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379")
+    # Supabase settings
+    supabase_db_url: str = os.getenv("SUPABASE_DB_URL")
+    supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY")
+    supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     
     # Service settings
     service_name: str = "service"
@@ -26,7 +30,12 @@ class Settings(BaseSettings):
     aggregation_interval: int = int(os.getenv("AGGREGATION_INTERVAL", "1"))  # seconds
     
     class Config:
+        # Keep env_file for potential overrides, but primary loading is via load_dotenv()
         env_file = ".env"
 
 def get_settings():
-    return Settings() 
+    settings = Settings()
+    if not settings.supabase_db_url:
+        raise ValueError("SUPABASE_DB_URL environment variable not set.")
+    # Add checks for other Supabase keys if necessary
+    return settings

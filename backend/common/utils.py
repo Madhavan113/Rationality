@@ -3,10 +3,6 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
-import redis
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from .config import get_settings
 
 settings = get_settings()
@@ -18,41 +14,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Database connection
-engine = create_engine(settings.database_url)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Redis connection
-redis_client = redis.from_url(settings.redis_url)
-
-def get_db():
-    """Dependency for getting a database session."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 def serialize_datetime(obj):
     """Serialize datetime objects for JSON conversion."""
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"Type {type(obj)} not serializable")
-
-def store_in_redis(key: str, data: Any, expiry: Optional[int] = None):
-    """Store data in Redis with optional expiry (in seconds)."""
-    serialized = json.dumps(data, default=serialize_datetime)
-    if expiry:
-        redis_client.setex(key, expiry, serialized)
-    else:
-        redis_client.set(key, serialized)
-
-def get_from_redis(key: str) -> Optional[Any]:
-    """Get data from Redis and deserialize it from JSON."""
-    data = redis_client.get(key)
-    if data:
-        return json.loads(data)
-    return None
 
 def calculate_mid_price(bids: List[Dict[str, Any]], asks: List[Dict[str, Any]]) -> float:
     """Calculate the mid-price from the order book."""
@@ -108,4 +74,4 @@ def calculate_brier_score(predictions: List[float], outcomes: List[int]) -> floa
         raise ValueError("Predictions and outcomes must have the same length")
     
     n = len(predictions)
-    return sum((predictions[i] - outcomes[i]) ** 2 for i in range(n)) / n 
+    return sum((predictions[i] - outcomes[i]) ** 2 for i in range(n)) / n

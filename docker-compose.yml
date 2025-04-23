@@ -16,6 +16,11 @@ services:
       - NODE_ENV=development
 
   # Backend services
+  # Ensure you have a .env file in the project root with:
+  # SUPABASE_DB_URL=your_supabase_connection_string
+  # SUPABASE_ANON_KEY=your_supabase_anon_key
+  # SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+
   ingestion:
     build:
       context: ./backend
@@ -24,12 +29,8 @@ services:
       - "8001:8001"
     volumes:
       - ./backend:/app
-    depends_on:
-      - redis
-      - postgres
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+    env_file:
+      - .env # Load Supabase credentials
 
   aggregator:
     build:
@@ -39,12 +40,8 @@ services:
       - "8002:8002"
     volumes:
       - ./backend:/app
-    depends_on:
-      - redis
-      - postgres
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+    env_file:
+      - .env # Load Supabase credentials
 
   leaderboard:
     build:
@@ -54,12 +51,8 @@ services:
       - "8003:8003"
     volumes:
       - ./backend:/app
-    depends_on:
-      - redis
-      - postgres
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+    env_file:
+      - .env # Load Supabase credentials
 
   alerts:
     build:
@@ -69,12 +62,10 @@ services:
       - "8004:8004"
     volumes:
       - ./backend:/app
-    depends_on:
-      - redis
-      - postgres
+    env_file:
+      - .env # Load Supabase credentials
     environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+      # Keep mailhog settings if needed for local testing
       - SMTP_HOST=mailhog
       - SMTP_PORT=1025
 
@@ -86,33 +77,10 @@ services:
       - "8005:8005"
     volumes:
       - ./backend:/app
-    depends_on:
-      - redis
-      - postgres
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/market_data
+    env_file:
+      - .env # Load Supabase credentials
 
-  # Database services
-  redis:
-    image: redis:latest
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-
-  postgres:
-    image: timescale/timescaledb:latest-pg14
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=market_data
-
-  # Mail service for testing
+  # Mail service for testing (optional, keep if alerts service uses it locally)
   mailhog:
     image: mailhog/mailhog
     ports:
@@ -120,5 +88,3 @@ services:
       - "8025:8025" # Web UI
 
 volumes:
-  redis_data:
-  postgres_data:

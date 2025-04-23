@@ -5,14 +5,13 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Any
 
-import websockets
 import httpx
 from fastapi import FastAPI, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from backend.common.config import get_settings
-from backend.common.utils import get_db, store_in_redis, calculate_mid_price
-from backend.common.db import Market, MarketSnapshot, init_db
+from backend.common.utils import calculate_mid_price
+from backend.common.db import Market, MarketSnapshot, init_db, get_db
 from backend.common.models import MarketSnapshot as MarketSnapshotModel
 
 # Initialize settings and logging
@@ -48,48 +47,37 @@ async def poll_polymarket():
     while True:
         try:
             # Simulate fetching market data
-            markets = await fetch_markets()
+            db: Session = next(get_db())
+            markets = await fetch_markets(db)
             for market in markets:
                 await fetch_and_store_market_data(market["id"])
+            db.close()
             
             await asyncio.sleep(5)  # Poll every 5 seconds
         except Exception as e:
             logger.error(f"Error polling Polymarket: {e}")
             await asyncio.sleep(10)  # Longer wait on error
 
-async def fetch_markets() -> List[Dict[str, Any]]:
+async def fetch_markets(db: Session) -> List[Dict[str, Any]]:
     """
-    Fetch available markets from Polymarket.
-    
-    TODO: Implement actual API calls.
-    This is a placeholder implementation.
+    Fetch available markets from the database.
     """
-    # Simulate API response with mock data
-    mock_markets = [
+    markets = db.query(Market).all()
+    return [
         {
-            "id": "1",
-            "name": "Will BTC be above $50k on July 1, 2024?",
-            "description": "Settlement based on Coinbase BTC/USD price at 00:00 UTC.",
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
-        },
-        {
-            "id": "2",
-            "name": "Will ETH be above $3k on July 1, 2024?",
-            "description": "Settlement based on Coinbase ETH/USD price at 00:00 UTC.",
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "id": market.id,
+            "name": market.name,
+            "description": market.description,
+            "created_at": market.created_at.isoformat(),
+            "updated_at": market.updated_at.isoformat()
         }
+        for market in markets
     ]
-    
-    return mock_markets
 
 async def fetch_and_store_market_data(market_id: str):
     """
-    Fetch market data for a specific market and store it.
-    
-    TODO: Implement actual API calls.
-    This is a placeholder implementation.
+    Fetch market data for a specific market and store it in the database.
+    Uses a dedicated DB session.
     """
     # Simulate order book data
     mock_data = {
@@ -117,20 +105,17 @@ async def fetch_and_store_market_data(market_id: str):
         mid_price=mid_price
     )
     
-    # Store in Redis
-    redis_key = f"market:{market_id}:snapshot"
-    store_in_redis(redis_key, snapshot.dict(), expiry=3600)
-    
-    # Store in database
-    async with httpx.AsyncClient() as client:
-        try:
-            # Store locally
-            await store_snapshot_in_db(snapshot)
-        except Exception as e:
-            logger.error(f"Error storing snapshot in database: {e}")
+    # Store in database using a new session
+    db: Session = next(get_db())
+    try:
+        await store_snapshot_in_db(snapshot, db)
+    except Exception as e:
+        logger.error(f"Error storing snapshot in database: {e}")
+    finally:
+        db.close()
 
-async def store_snapshot_in_db(snapshot: MarketSnapshotModel):
-    """Store market snapshot in the database."""
+async def store_snapshot_in_db(snapshot: MarketSnapshotModel, db: Session):
+    """Store market snapshot in the database using the provided session."""
     db_snapshot = MarketSnapshot(
         market_id=snapshot.market_id,
         timestamp=snapshot.timestamp,
@@ -141,7 +126,9 @@ async def store_snapshot_in_db(snapshot: MarketSnapshotModel):
         mid_price=snapshot.mid_price
     )
     
-    # TODO: Implement actual database storage
+    db.add(db_snapshot)
+    db.commit()
+    
     logger.info(f"Stored snapshot for market {snapshot.market_id} with mid-price {snapshot.mid_price}")
 
 @app.post("/api/markets")
@@ -185,4 +172,4 @@ if __name__ == "__main__":
         host=settings.service_host,
         port=settings.service_port,
         reload=True
-    ) 
+    )

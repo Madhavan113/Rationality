@@ -1,12 +1,16 @@
 from datetime import datetime
 from sqlalchemy import Column, String, Float, DateTime, Integer, ForeignKey, Text, Boolean, create_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, sessionmaker
 
 from .config import get_settings
 
 Base = declarative_base()
 settings = get_settings()
+
+# Create SQLAlchemy engine using Supabase URL
+engine = create_engine(settings.supabase_db_url)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 class Market(Base):
     __tablename__ = "markets"
@@ -76,5 +80,13 @@ class AlertNotification(Base):
 
 def init_db():
     """Initialize the database with tables."""
-    engine = create_engine(settings.database_url)
-    Base.metadata.create_all(engine) 
+    # The engine is already created above
+    Base.metadata.create_all(bind=engine)
+
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
