@@ -1,0 +1,57 @@
+{
+  "timestamp": "2025-04-23T20:00:36.446541",
+  "tests": [
+    {
+      "name": "Database Connectivity",
+      "passed": true,
+      "message": "Successfully connected to database"
+    },
+    {
+      "name": "Database Schema",
+      "passed": true,
+      "message": "All required tables exist"
+    },
+    {
+      "name": "Ingestion Service Health Check",
+      "passed": false,
+      "message": "Connection refused to http://localhost:8001/health. Is the service running and binding to the correct interface?"
+    },
+    {
+      "name": "Aggregator Service Health Check",
+      "passed": false,
+      "message": "Connection refused to http://localhost:8002/health. Is the service running and binding to the correct interface?"
+    },
+    {
+      "name": "Leaderboard Service Health Check",
+      "passed": false,
+      "message": "Connection refused to http://localhost:8003/health. Is the service running and binding to the correct interface?"
+    },
+    {
+      "name": "Alerts Service Health Check",
+      "passed": false,
+      "message": "Connection refused to http://localhost:8004/health. Is the service running and binding to the correct interface?"
+    },
+    {
+      "name": "Rationality Service Health Check",
+      "passed": false,
+      "message": "Connection refused to http://localhost:8005/health. Is the service running and binding to the correct interface?"
+    },
+    {
+      "name": "Market API Endpoints",
+      "passed": false,
+      "message": "Request error: All connection attempts failed"
+    },
+    {
+      "name": "Alert API Endpoints",
+      "passed": false,
+      "message": "Request error: All connection attempts failed"
+    }
+  ],
+  "summary": {
+    "total": 9,
+    "passed": 2,
+    "failed": 7,
+    "success_rate": "22.2%",
+    "total_time": "18.93s"
+  }
+}

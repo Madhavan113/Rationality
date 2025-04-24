@@ -2,19 +2,20 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Copy the requirements file from the parent backend directory
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy requirements.txt
+COPY ./requirements.txt .
+RUN pip install -r requirements.txt
 
-# Copy the common backend code from the parent backend directory
-COPY common ./common
-# Copy the specific service's code from the current context
-COPY rationality ./rationality
+# Copy all code from the current context
+COPY . .
 
-ENV MODULE_NAME=backend.rationality.main
-ENV VARIABLE_NAME=app
-ENV SERVICE_PORT=8005
+# Create a Python package path for the common module
+ENV PYTHONPATH=/app
 
-EXPOSE 8005
+# Default port if not provided by Railway
+ENV DEFAULT_PORT=8005
 
-CMD ["uvicorn", "rationality.main:app", "--host", "0.0.0.0", "--port", "8005"]
+EXPOSE ${PORT:-8005}
+
+# Use shell form to ensure environment variables are properly expanded
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8005}

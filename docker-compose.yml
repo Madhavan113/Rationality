@@ -89,4 +89,6 @@ services:
       - "1025:1025" # SMTP port
       - "8025:8025" # Web UI
 
+# Define named volumes if needed
 volumes:
+  app-data: # Example volume definition, remove if not neededI

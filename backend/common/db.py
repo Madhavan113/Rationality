@@ -78,10 +78,18 @@ class AlertNotification(Base):
     difference = Column(Float, nullable=False)
     sent_at = Column(DateTime, default=datetime.utcnow)
 
-def init_db():
-    """Initialize the database with tables."""
-    # The engine is already created above
-    Base.metadata.create_all(bind=engine)
+def init_db(use_create_all=False):
+    """Initialize the database with tables.
+    
+    Args:
+        use_create_all (bool): If True, use Base.metadata.create_all to create tables.
+                               For production, this should be False and you should rely on
+                               Alembic migrations (alembic upgrade head) instead.
+    """
+    if use_create_all:
+        # Use create_all only in development or when explicitly needed
+        # For production, rely on Alembic migrations instead
+        Base.metadata.create_all(bind=engine)
 
 # Dependency to get DB session
 def get_db():

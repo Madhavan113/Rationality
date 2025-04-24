@@ -2,19 +2,7 @@
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS"
-    // Nixpacks should automatically detect the Dockerfiles for each service
-    // if they are correctly placed and the build context is set appropriately
-    // in the Railway service settings (e.g., pointing to backend/aggregator for the aggregator service).
-    // If using Nixpacks without Dockerfiles, you'd need a nixpacks.toml or similar.
-    // Since Dockerfiles are present and define CMD, the startCommand here is likely redundant
-    // and might conflict. Removing it relies on Railway correctly interpreting the Dockerfile CMD.
-    // Ensure each service in Railway UI points to the correct subdirectory (e.g., backend/ingestion).
-    /*
-    "nixpacksConfig": {
-      // This startCommand was too generic for microservices.
-      // "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT"
-    }
-    */
+
   },
   "deploy": {
     "numReplicas": 1,

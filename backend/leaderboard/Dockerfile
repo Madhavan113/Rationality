@@ -2,19 +2,21 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Copy the requirements file from the parent backend directory
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy requirements.txt
+COPY ./requirements.txt .
+RUN pip install -r requirements.txt
 
-# Copy the common backend code from the parent backend directory
-COPY common ./common
-# Copy the specific service's code from the current context
-COPY leaderboard ./leaderboard
+# Copy all code from the current context
+COPY . .
 
-ENV MODULE_NAME=backend.leaderboard.main
+# Create a Python package path for the common module
+ENV PYTHONPATH=/app
+
+ENV MODULE_NAME=main
 ENV VARIABLE_NAME=app
-ENV SERVICE_PORT=8003
+ENV DEFAULT_PORT=8003
 
-EXPOSE 8003
+EXPOSE ${PORT:-8003}
 
-CMD ["uvicorn", "leaderboard.main:app", "--host", "0.0.0.0", "--port", "8003"]
+# Use shell form to ensure environment variables are properly expanded
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8003}

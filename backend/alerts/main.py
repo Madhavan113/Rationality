@@ -13,9 +13,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from sqlalchemy.exc import SQLAlchemyError
 
-from backend.common.config import get_settings
-from backend.common.db import AlertRule, AlertNotification, Market, TruePrice, init_db, get_db
-from backend.common.models import AlertRule as AlertRuleModel, AlertNotification as AlertNotificationModel
+from ..common.config import get_settings
+from ..common.db import AlertRule, AlertNotification, Market, TruePrice, init_db, get_db
+from ..common.models import AlertRule as AlertRuleModel, AlertNotification as AlertNotificationModel
 
 # Initialize settings and logging
 settings = get_settings()
@@ -44,7 +44,7 @@ app.add_middleware(
 )
 
 # Initialize database
-init_db()
+init_db(use_create_all=False)
 
 @app.get("/health")
 def health_check():

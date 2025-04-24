@@ -3,6 +3,12 @@ import json
 import logging
 import math  # Import math for isnan
 from datetime import datetime, timedelta
+import sys
+import os
+
+# Add the backend directory to the path to resolve imports correctly
+backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, backend_dir)
 
 import httpx
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException
@@ -11,15 +17,33 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, desc
 from sqlalchemy.exc import SQLAlchemyError
 
-from backend.common.config import get_settings
-from backend.common.utils import calculate_true_price
-from backend.common.db import Market, TruePrice, MarketSnapshot, init_db, get_db
-from backend.common.models import TruePrice as TruePriceModel
+# Import directly from the correct modules
+from common.config import get_settings
+from common.utils import calculate_true_price
+from common.db import Market, MarketSnapshot, init_db, get_db, TruePrice  
+
+# Create an alias for the TruePrice Pydantic model
+TruePriceModel = None  # Will be defined below
 
 # Initialize settings and logging
 settings = get_settings()
 settings.service_name = "aggregator"
 settings.service_port = 8002
+
+# Import the TruePriceModel directly from the file
+try:
+    # Try importing from common.models module
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "models", os.path.join(backend_dir, "common", "models.py")
+    )
+    models_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(models_module)
+    TruePriceModel = models_module.TruePrice
+    logging.info("Successfully imported TruePriceModel")
+except Exception as e:
+    logging.error(f"Error importing TruePriceModel: {e}")
+    raise
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,7 +67,7 @@ app.add_middleware(
 )
 
 # Initialize database
-init_db()
+init_db(use_create_all=False)
 
 @app.get("/health")
 def health_check():

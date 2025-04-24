@@ -7,12 +7,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 import httpx
 
-from backend.common.config import get_settings
-from backend.common.db import init_db, get_db
-from backend.common.models.rationality import RationalityMetrics
-from backend.common.services.polymarket_client import PolymarketRestClient
-from backend.common.services.rationality_calculator import SimpleRationalityCalculator
-from backend.common.services.rationality_service import RationalityService
+# Change absolute imports to relative imports
+from ..common.config import get_settings
+from ..common.db import init_db, get_db
+from ..common.models.rationality import RationalityMetrics
+from ..common.services.polymarket_client import PolymarketRestClient
+from ..common.services.rationality_calculator import SimpleRationalityCalculator
+from ..common.services.rationality_service import RationalityService
 
 # Initialize settings and logging
 settings = get_settings()
@@ -41,7 +42,7 @@ app.add_middleware(
 )
 
 # Initialize database
-init_db()
+init_db(use_create_all=False)
 
 # Initialize service objects with the real client
 client = PolymarketRestClient()
