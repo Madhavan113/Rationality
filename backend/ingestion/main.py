@@ -12,11 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
-from backend.common.config import get_settings
-from backend.common.utils import calculate_mid_price
-from backend.common.db import Market, MarketSnapshot, init_db, get_db
-from backend.common.models import MarketSnapshot as MarketSnapshotModel
-from backend.common.services.polymarket_client import PolymarketRestClient
+from common.config import get_settings
+from common.utils import calculate_mid_price
+from common.db import Market, MarketSnapshot, init_db, get_db
+from common.models import MarketSnapshot as MarketSnapshotModel
+from common.services.polymarket_client import PolymarketRestClient
 
 # Initialize settings and logging
 settings = get_settings()
@@ -45,7 +45,7 @@ app.add_middleware(
 )
 
 # Initialize database
-init_db()
+init_db(use_create_all=False)
 
 # Initialize Polymarket client
 polymarket_client = PolymarketRestClient()
